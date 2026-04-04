@@ -247,6 +247,18 @@ tbody td { padding: 11px 12px; vertical-align: middle; }
       <div class="modal-title" id="modal-title">Add role</div>
       <button class="modal-close" onclick="closeModal()">×</button>
     </div>
+
+    <!-- URL autofill -->
+    <div class="field" id="autofill-field">
+      <label>Paste job URL to autofill ✦</label>
+      <div style="display:flex;gap:8px;">
+        <input id="f-autofill-url" placeholder="https://linkedin.com/jobs/... or any job page" style="flex:1;" onkeydown="if(event.key==='Enter')autofillFromUrl()" />
+        <button class="btn btn-primary" onclick="autofillFromUrl()" id="autofill-btn">Fill</button>
+      </div>
+      <div id="autofill-status" style="font-size:11px;color:var(--muted);margin-top:4px;min-height:16px;"></div>
+    </div>
+    <div style="border-top:1px solid var(--border);margin:0.75rem 0;"></div>
+
     <div class="two-col">
       <div class="field"><label>Company</label><input id="f-company" placeholder="e.g. Wix" /></div>
       <div class="field"><label>Role title</label><input id="f-role" placeholder="e.g. Senior PM" oninput="clearAI()" /></div>
@@ -456,6 +468,7 @@ function openModal(id) {
     const j = jobs.find(x => x.id === id);
     if (!j) return;
     document.getElementById('modal-title').textContent = 'Edit role';
+    document.getElementById('autofill-field').style.display = 'none';
     document.getElementById('f-company').value = j.company;
     document.getElementById('f-role').value = j.role;
     document.getElementById('f-status-m').value = j.status;
@@ -468,6 +481,10 @@ function openModal(id) {
     setTimeout(triggerAI, 300);
   } else {
     document.getElementById('modal-title').textContent = 'Add role';
+    document.getElementById('autofill-field').style.display = 'block';
+    document.getElementById('f-autofill-url').value = '';
+    document.getElementById('autofill-status').textContent = '';
+    document.getElementById('autofill-btn').textContent = 'Fill';
     document.getElementById('f-company').value = '';
     document.getElementById('f-role').value = '';
     document.getElementById('f-status-m').value = 'Watching';
@@ -531,7 +548,70 @@ async function deleteRole() {
   } catch(e) { toast('Delete failed'); }
 }
 
-// --- AI next action ---
+// --- URL Autofill ---
+async function autofillFromUrl() {
+  const { apiKey } = getConfig();
+  if (!apiKey) { toast('Add your API key in settings first'); return; }
+  const url = document.getElementById('f-autofill-url').value.trim();
+  if (!url || !url.startsWith('http')) { toast('Paste a valid job URL'); return; }
+
+  const btn = document.getElementById('autofill-btn');
+  const status = document.getElementById('autofill-status');
+  btn.textContent = '...';
+  btn.disabled = true;
+  status.textContent = 'Reading the page...';
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'interleaved-thinking-2025-05-14' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        messages: [{
+          role: 'user',
+          content: `Fetch this job posting URL and extract the details: ${url}
+
+Return ONLY a JSON object (no markdown, no explanation) with these exact keys:
+{
+  "company": "Company name",
+  "role": "Exact job title",
+  "location": "Location or Remote",
+  "notes": "2-3 sentence summary: key responsibilities, required skills, and what makes this role interesting"
+}
+
+If you cannot access the page, still return a best-guess JSON based on the URL itself.`
+        }]
+      })
+    });
+
+    const data = await res.json();
+    const textBlock = data.content?.find(b => b.type === 'text');
+    const raw = textBlock?.text || '';
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No JSON');
+    const parsed = JSON.parse(jsonMatch[0]);
+
+    if (parsed.company) document.getElementById('f-company').value = parsed.company;
+    if (parsed.role) document.getElementById('f-role').value = parsed.role;
+    if (parsed.notes) document.getElementById('f-notes').value = parsed.notes + (parsed.location ? `\nLocation: ${parsed.location}` : '');
+    document.getElementById('f-url').value = url;
+
+    status.style.color = 'var(--green)';
+    status.textContent = '✓ Filled from job page — review and adjust';
+    btn.textContent = 'Fill';
+    btn.disabled = false;
+    triggerAI();
+  } catch(e) {
+    status.style.color = 'var(--red)';
+    status.textContent = 'Could not read page — fill manually';
+    btn.textContent = 'Fill';
+    btn.disabled = false;
+  }
+}
+
+
 function clearAI() {
   document.getElementById('ai-box').style.display = 'none';
   document.getElementById('ai-text').textContent = '';
