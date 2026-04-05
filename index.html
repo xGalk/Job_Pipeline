@@ -133,16 +133,6 @@ tbody td { padding: 11px 12px; vertical-align: middle; }
 .ai-chip:hover { background: rgba(124,106,255,0.22); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Config screen */
-.config-screen { max-width: 540px; margin: 4rem auto; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 2.5rem; }
-.config-screen h2 { font-size: 20px; font-weight: 600; margin-bottom: 0.5rem; }
-.config-screen p { color: var(--muted); font-size: 13px; line-height: 1.7; margin-bottom: 1.5rem; }
-.config-step { display: flex; gap: 12px; margin-bottom: 1rem; }
-.step-num { flex-shrink: 0; width: 24px; height: 24px; background: var(--accent); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; margin-top: 1px; }
-.step-body { font-size: 13px; line-height: 1.6; color: var(--muted); }
-.step-body strong { color: var(--text); }
-.step-body code { font-family: var(--mono); font-size: 12px; background: var(--bg3); padding: 1px 6px; border-radius: 4px; color: var(--accent2); }
-
 /* Empty state */
 .empty { text-align: center; padding: 4rem 1rem; color: var(--muted); }
 .empty-icon { font-size: 32px; margin-bottom: 1rem; opacity: 0.4; }
@@ -177,20 +167,8 @@ tbody td { padding: 11px 12px; vertical-align: middle; }
 
 <div class="app" id="app">
 
-  <!-- Config screen shown when no sheet URL set -->
-  <div id="config-screen" class="config-screen" style="display:none;">
-    <h2>Connect your sheet</h2>
-    <p>This tracker stores your data in a Google Sheet you own — private, free, accessible from any device.</p>
-    <div class="config-step"><div class="step-num">1</div><div class="step-body">Create a new Google Sheet. Go to <strong>Extensions → Apps Script</strong> and paste the <code>Code.gs</code> file provided.</div></div>
-    <div class="config-step"><div class="step-num">2</div><div class="step-body">Click <strong>Deploy → New deployment → Web app</strong>. Set "Execute as: Me" and "Who has access: Anyone". Copy the URL.</div></div>
-    <div class="config-step"><div class="step-num">3</div><div class="step-body">Paste your Anthropic API key (for AI suggestions). You can get one free at <strong>console.anthropic.com</strong>.</div></div>
-    <div class="field" style="margin-top:1.5rem;"><label>Google Apps Script URL</label><input id="cfg-sheet" placeholder="https://script.google.com/macros/s/.../exec" /></div>
-    <div class="field"><label>Anthropic API Key (for AI features)</label><input id="cfg-key" type="password" placeholder="sk-ant-..." /></div>
-    <button class="btn btn-primary" style="width:100%; justify-content:center; margin-top:0.5rem;" onclick="saveConfig()">Connect & Start →</button>
-  </div>
-
   <!-- Main app -->
-  <div id="main" style="display:none;">
+  <div id="main">
     <div class="topbar">
       <div class="logo">gal · <span>pipeline</span></div>
       <div class="topbar-right">
@@ -199,7 +177,7 @@ tbody td { padding: 11px 12px; vertical-align: middle; }
           <button class="view-btn" id="btn-kanban" onclick="setView('kanban')">⊞ Board</button>
         </div>
         <button class="btn btn-primary desktop-only" onclick="openModal()">+ Add role</button>
-        <button class="btn btn-ghost btn-sm" onclick="resetConfig()" title="Settings">⚙</button>
+        <button class="btn btn-ghost btn-sm" onclick="openSettings()" title="Settings">⚙</button>
       </div>
     </div>
 
@@ -299,6 +277,30 @@ tbody td { padding: 11px 12px; vertical-align: middle; }
   </div>
 </div>
 
+<!-- Settings: optional AI key + backup -->
+<div class="overlay" id="settings-overlay" onclick="settingsOverlayClick(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div class="modal-title">Settings</div>
+      <button class="modal-close" onclick="closeSettings()">×</button>
+    </div>
+    <p style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:1.25rem;">Your applications are saved in this browser only. Use export/import to move data between devices.</p>
+    <div class="field"><label>Optional: Anthropic API key (AI next-step & “Fill from URL”)</label><input id="settings-api-key" type="password" placeholder="sk-ant-…" autocomplete="off" /></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:1rem;">
+      <button type="button" class="btn btn-ghost" onclick="exportBackup()">Export JSON</button>
+      <button type="button" class="btn btn-ghost" onclick="document.getElementById('import-file').click()">Import JSON</button>
+      <input type="file" id="import-file" accept="application/json,.json" style="display:none" onchange="importBackup(event)" />
+    </div>
+    <div class="modal-footer" style="border-top:none;padding-top:0;margin-top:0;">
+      <button type="button" class="btn btn-danger btn-sm" onclick="clearAllData()">Erase all roles</button>
+      <div style="display:flex;gap:8px;margin-left:auto;">
+        <button type="button" class="btn btn-ghost" onclick="closeSettings()">Close</button>
+        <button type="button" class="btn btn-primary" onclick="saveSettings()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -308,60 +310,99 @@ let view = 'table';
 let aiTimeout = null;
 
 const STATUSES = ['Watching','Applied','Interview','Offer','Rejected','Pass'];
+const STORAGE_KEY = 'gal_jobs_v1';
 
-// --- Config ---
+// --- Config (optional API key for AI only) ---
 function getConfig() {
-  return { sheetUrl: localStorage.getItem('gal_sheet_url') || '', apiKey: localStorage.getItem('gal_api_key') || '' };
+  return { apiKey: localStorage.getItem('gal_api_key') || '' };
 }
-function saveConfig() {
-  const url = document.getElementById('cfg-sheet').value.trim();
-  const key = document.getElementById('cfg-key').value.trim();
-  if (!url) { toast('Paste your Apps Script URL'); return; }
-  localStorage.setItem('gal_sheet_url', url);
+
+function loadJobsFromStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const data = JSON.parse(raw);
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function persistJobs() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(jobs));
+  } catch (e) {
+    toast('Could not save — storage may be full');
+  }
+}
+
+function openSettings() {
+  document.getElementById('settings-api-key').value = getConfig().apiKey;
+  document.getElementById('settings-overlay').classList.add('open');
+}
+
+function closeSettings() {
+  document.getElementById('settings-overlay').classList.remove('open');
+}
+
+function settingsOverlayClick(e) {
+  if (e.target === document.getElementById('settings-overlay')) closeSettings();
+}
+
+function saveSettings() {
+  const key = document.getElementById('settings-api-key').value.trim();
   if (key) localStorage.setItem('gal_api_key', key);
-  init();
+  else localStorage.removeItem('gal_api_key');
+  toast('Saved');
+  closeSettings();
 }
-function resetConfig() {
-  if (!confirm('Reset connection settings?')) return;
-  localStorage.removeItem('gal_sheet_url');
-  localStorage.removeItem('gal_api_key');
-  location.reload();
+
+function exportBackup() {
+  const blob = new Blob([JSON.stringify(jobs, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `job-pipeline-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('Backup downloaded');
+}
+
+function importBackup(e) {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      if (!Array.isArray(data)) throw new Error('invalid');
+      jobs = data;
+      persistJobs();
+      renderView();
+      toast('Imported');
+      closeSettings();
+    } catch (err) {
+      toast('Invalid JSON file');
+    }
+  };
+  reader.readAsText(f);
+}
+
+function clearAllData() {
+  if (!confirm('Remove all applications from this browser? This cannot be undone.')) return;
+  jobs = [];
+  persistJobs();
+  renderView();
+  closeModal();
+  closeSettings();
+  toast('All roles cleared');
 }
 
 // --- Init ---
-async function init() {
-  const cfg = getConfig();
-  if (!cfg.sheetUrl) {
-    document.getElementById('config-screen').style.display = 'block';
-    document.getElementById('main').style.display = 'none';
-    return;
-  }
-  document.getElementById('config-screen').style.display = 'none';
-  document.getElementById('main').style.display = 'block';
-  await loadJobs();
-}
-
-// --- Sheet API ---
-async function sheetGet(action) {
-  const { sheetUrl } = getConfig();
-  const res = await fetch(`${sheetUrl}?action=${action}`);
-  return res.json();
-}
-async function sheetPost(data) {
-  const { sheetUrl } = getConfig();
-  const res = await fetch(sheetUrl, { method:'POST', body: JSON.stringify(data) });
-  return res.json();
-}
-
-async function loadJobs() {
-  try {
-    const data = await sheetGet('getAll');
-    jobs = Array.isArray(data) ? data : [];
-    renderView();
-    renderStats();
-  } catch(e) {
-    toast('Could not load sheet — check your URL');
-  }
+function init() {
+  jobs = loadJobsFromStorage();
+  renderView();
+  renderStats();
 }
 
 // --- Render ---
@@ -521,27 +562,26 @@ async function saveRole() {
   try {
     if (editingId) {
       row.id = editingId;
-      await sheetPost({ action:'update', row });
       const idx = jobs.findIndex(j => j.id === editingId);
       if (idx > -1) jobs[idx] = { ...jobs[idx], ...row };
       toast('Updated');
     } else {
       row.id = Date.now().toString();
       row.created_at = new Date().toISOString();
-      await sheetPost({ action:'add', row });
       jobs.unshift(row);
       toast('Added');
     }
+    persistJobs();
     closeModal();
     renderView();
-  } catch(e) { toast('Save failed — check connection'); }
+  } catch(e) { toast('Save failed'); }
 }
 
 async function deleteRole() {
   if (!editingId || !confirm('Remove this role?')) return;
   try {
-    await sheetPost({ action:'delete', id: editingId });
     jobs = jobs.filter(j => j.id !== editingId);
+    persistJobs();
     closeModal();
     renderView();
     toast('Removed');
@@ -551,7 +591,7 @@ async function deleteRole() {
 // --- URL Autofill ---
 async function autofillFromUrl() {
   const { apiKey } = getConfig();
-  if (!apiKey) { toast('Add your API key in settings first'); return; }
+  if (!apiKey) { toast('Add an API key in Settings (⚙) for autofill'); return; }
   const url = document.getElementById('f-autofill-url').value.trim();
   if (!url || !url.startsWith('http')) { toast('Paste a valid job URL'); return; }
 
