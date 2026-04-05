@@ -284,7 +284,9 @@ tbody td { padding: 11px 12px; vertical-align: middle; }
       <div class="modal-title">Settings</div>
       <button class="modal-close" onclick="closeSettings()">×</button>
     </div>
-    <p style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:1.25rem;">Your applications are saved in this browser only. Use export/import to move data between devices.</p>
+    <p style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:1.25rem;">Data is always cached in this browser. Add Supabase below to sync the same list from any device on the web (see <code style="font-family:var(--mono);font-size:12px;">supabase-setup.sql</code> in the repo).</p>
+    <div class="field"><label>Supabase project URL</label><input id="settings-supabase-url" type="url" placeholder="https://xxxx.supabase.co" autocomplete="off" /></div>
+    <div class="field"><label>Supabase anon public key</label><input id="settings-supabase-key" type="password" placeholder="eyJhbGciOiJIUzI1NiIs…" autocomplete="off" /></div>
     <div class="field"><label>Optional: Anthropic API key (AI next-step & “Fill from URL”)</label><input id="settings-api-key" type="password" placeholder="sk-ant-…" autocomplete="off" /></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:1rem;">
       <button type="button" class="btn btn-ghost" onclick="exportBackup()">Export JSON</button>
@@ -312,9 +314,48 @@ let aiTimeout = null;
 const STATUSES = ['Watching','Applied','Interview','Offer','Rejected','Pass'];
 const STORAGE_KEY = 'gal_jobs_v1';
 
-// --- Config (optional API key for AI only) ---
+// --- Config (optional API key for AI; optional Supabase for cloud sync) ---
 function getConfig() {
   return { apiKey: localStorage.getItem('gal_api_key') || '' };
+}
+
+function getSupabaseCredentials() {
+  return {
+    url: (localStorage.getItem('gal_supabase_url') || '').trim().replace(/\/$/, ''),
+    key: (localStorage.getItem('gal_supabase_key') || '').trim()
+  };
+}
+
+function supabaseConfigured() {
+  const { url, key } = getSupabaseCredentials();
+  return !!(url && key && url.startsWith('http'));
+}
+
+async function loadFromSupabase() {
+  const { url, key } = getSupabaseCredentials();
+  const r = await fetch(`${url}/rest/v1/pipeline_state?id=eq.main&select=jobs`, {
+    headers: { apikey: key, Authorization: `Bearer ${key}`, Accept: 'application/json' }
+  });
+  if (!r.ok) throw new Error(await r.text());
+  const rows = await r.json();
+  if (!rows.length) return [];
+  const j = rows[0].jobs;
+  return Array.isArray(j) ? j : [];
+}
+
+async function saveToSupabase() {
+  const { url, key } = getSupabaseCredentials();
+  const r = await fetch(`${url}/rest/v1/pipeline_state?on_conflict=id`, {
+    method: 'POST',
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates,return=minimal'
+    },
+    body: JSON.stringify({ id: 'main', jobs: jobs })
+  });
+  if (!r.ok) throw new Error(await r.text());
 }
 
 function loadJobsFromStorage() {
@@ -328,7 +369,7 @@ function loadJobsFromStorage() {
   }
 }
 
-function persistJobs() {
+function persistJobsLocal() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(jobs));
   } catch (e) {
@@ -336,7 +377,20 @@ function persistJobs() {
   }
 }
 
+async function persistJobs() {
+  persistJobsLocal();
+  if (!supabaseConfigured()) return;
+  try {
+    await saveToSupabase();
+  } catch (e) {
+    toast('Cloud sync failed — saved on this device only');
+  }
+}
+
 function openSettings() {
+  const sb = getSupabaseCredentials();
+  document.getElementById('settings-supabase-url').value = sb.url || '';
+  document.getElementById('settings-supabase-key').value = sb.key || '';
   document.getElementById('settings-api-key').value = getConfig().apiKey;
   document.getElementById('settings-overlay').classList.add('open');
 }
@@ -349,12 +403,22 @@ function settingsOverlayClick(e) {
   if (e.target === document.getElementById('settings-overlay')) closeSettings();
 }
 
-function saveSettings() {
+async function saveSettings() {
+  const sUrl = document.getElementById('settings-supabase-url').value.trim();
+  const sKey = document.getElementById('settings-supabase-key').value.trim();
+  if (sUrl) localStorage.setItem('gal_supabase_url', sUrl.replace(/\/$/, ''));
+  else localStorage.removeItem('gal_supabase_url');
+  if (sKey) localStorage.setItem('gal_supabase_key', sKey);
+  else localStorage.removeItem('gal_supabase_key');
+
   const key = document.getElementById('settings-api-key').value.trim();
   if (key) localStorage.setItem('gal_api_key', key);
   else localStorage.removeItem('gal_api_key');
-  toast('Saved');
+
   closeSettings();
+  toast('Saved');
+  await persistJobs();
+  await init();
 }
 
 function exportBackup() {
@@ -372,12 +436,12 @@ function importBackup(e) {
   e.target.value = '';
   if (!f) return;
   const reader = new FileReader();
-  reader.onload = () => {
+  reader.onload = async () => {
     try {
       const data = JSON.parse(reader.result);
       if (!Array.isArray(data)) throw new Error('invalid');
       jobs = data;
-      persistJobs();
+      await persistJobs();
       renderView();
       toast('Imported');
       closeSettings();
@@ -388,10 +452,10 @@ function importBackup(e) {
   reader.readAsText(f);
 }
 
-function clearAllData() {
-  if (!confirm('Remove all applications from this browser? This cannot be undone.')) return;
+async function clearAllData() {
+  if (!confirm('Remove all applications from this browser and cloud (if connected)? This cannot be undone.')) return;
   jobs = [];
-  persistJobs();
+  await persistJobs();
   renderView();
   closeModal();
   closeSettings();
@@ -399,8 +463,28 @@ function clearAllData() {
 }
 
 // --- Init ---
-function init() {
-  jobs = loadJobsFromStorage();
+async function init() {
+  const local = loadJobsFromStorage();
+  if (!supabaseConfigured()) {
+    jobs = local;
+    renderView();
+    renderStats();
+    return;
+  }
+  try {
+    const remote = await loadFromSupabase();
+    if (remote.length === 0 && local.length > 0) {
+      jobs = local;
+      await persistJobs();
+      toast('Uploaded local data to cloud');
+    } else {
+      jobs = remote;
+      persistJobsLocal();
+    }
+  } catch (e) {
+    jobs = local;
+    toast('Cloud unavailable — using local data');
+  }
   renderView();
   renderStats();
 }
@@ -571,7 +655,7 @@ async function saveRole() {
       jobs.unshift(row);
       toast('Added');
     }
-    persistJobs();
+    await persistJobs();
     closeModal();
     renderView();
   } catch(e) { toast('Save failed'); }
@@ -581,7 +665,7 @@ async function deleteRole() {
   if (!editingId || !confirm('Remove this role?')) return;
   try {
     jobs = jobs.filter(j => j.id !== editingId);
-    persistJobs();
+    await persistJobs();
     closeModal();
     renderView();
     toast('Removed');
@@ -729,7 +813,7 @@ function toast(msg) {
   setTimeout(() => t.classList.remove('show'), 2800);
 }
 
-init();
+init().catch(() => toast('Could not start'));
 </script>
 </body>
 </html>
